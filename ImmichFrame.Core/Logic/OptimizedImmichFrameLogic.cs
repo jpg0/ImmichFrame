@@ -2,358 +2,200 @@ using ImmichFrame.Core.Api;
 using ImmichFrame.Core.Exceptions;
 using ImmichFrame.Core.Helpers;
 using ImmichFrame.Core.Interfaces;
+using ImmichFrame.Core.Models.AssetPools;
 using Microsoft.Extensions.Logging;
 using System.Linq;
 using System.Collections.Generic;
-
-public class AssetPoolDetails {
-    public int Count { get; set; }
-    public List<Guid>? MemoryAssetIds { get; set; } // Specific to memory pool
-}
+using System.Threading.Tasks; // Ensure Task is available
 
 public class OptimizedImmichFrameLogic : IImmichFrameLogic, IDisposable
 {
     private readonly IServerSettings _settings;
     private readonly HttpClient _httpClient;
-    private readonly ImmichApi _immichApi;
+    private ImmichApi _immichApi; // Made non-readonly for constructor init
     private readonly ILogger<OptimizedImmichFrameLogic> _logger;
-    private readonly ApiCache<Dictionary<string, AssetPoolDetails>> _assetPoolCache;
+    private readonly ILoggerFactory _loggerFactory; // Added
+    private readonly ApiCache<List<IAssetPool>> _assetPoolCache; // Changed type
     private Random _random = new Random();
 
-    public OptimizedImmichFrameLogic(IServerSettings settings, ILogger<OptimizedImmichFrameLogic> logger)
+    public OptimizedImmichFrameLogic(IServerSettings settings, ILogger<OptimizedImmichFrameLogic> logger, ILoggerFactory loggerFactory) // Added loggerFactory
     {
         _settings = settings;
         _logger = logger;
+        _loggerFactory = loggerFactory; // Stored loggerFactory
         _httpClient = new HttpClient();
         _httpClient.UseApiKey(_settings.ApiKey);
-        _immichApi = new ImmichApi(_settings.ImmichServerUrl, _httpClient);
-        _assetPoolCache = new ApiCache<Dictionary<string, AssetPoolDetails>>(TimeSpan.FromHours(_settings.RefreshAlbumPeopleInterval));
+        _immichApi = new ImmichApi(_settings.ImmichServerUrl, _httpClient); // Initialized _immichApi
+        _assetPoolCache = new ApiCache<List<IAssetPool>>(TimeSpan.FromHours(_settings.RefreshAlbumPeopleInterval)); // Changed type
     }
 
     public void Dispose()
     {
         _assetPoolCache.Dispose();
         _httpClient.Dispose();
+        // GC.SuppressFinalize(this); // Only add if class has a finalizer ~OptimizedImmichFrameLogic()
     }
 
-    public async Task<AssetResponseDto?> GetNextAsset()
+    private async Task<List<IAssetPool>> InitializeAssetPoolsAsync()
     {
-        _logger.LogInformation("OptimizedImmichFrameLogic: GetNextAsset called. Fetching/retrieving asset pool details from cache.");
-        var poolDetailsDictionary = await _assetPoolCache.GetOrAddAsync("AllAssetPoolDetails", FetchAssetPoolDetailsAsync);
-
-        if (poolDetailsDictionary == null || !poolDetailsDictionary.Any(kvp => kvp.Value.Count > 0))
-        {
-            _logger.LogWarning("OptimizedImmichFrameLogic: No asset pool details found or all pools are empty after attempting to fetch.");
-            return null;
-        }
-
-        // Calculate total assets available across all pools
-        long totalAssets = 0;
-        foreach (var poolDetail in poolDetailsDictionary.Values)
-        {
-            totalAssets += poolDetail.Count;
-        }
-
-        if (totalAssets == 0)
-        {
-            _logger.LogWarning("OptimizedImmichFrameLogic: Total assets across all pools is 0. Cannot select an asset.");
-            return null;
-        }
-
-        _logger.LogInformation($"OptimizedImmichFrameLogic: Total assets available for selection: {totalAssets}");
-
-        // Generate a random number to pick an asset across all pools
-        long randomAssetIndex = (long)(_random.NextDouble() * totalAssets); // Use long for large counts
-
-        _logger.LogDebug($"OptimizedImmichFrameLogic: Random asset index selected: {randomAssetIndex} (out of {totalAssets})");
-
-        // Determine which pool the selected asset belongs to
-        AssetResponseDto? selectedAsset = null;
-        string selectedPoolKey = "unknown";
-
-        foreach (var poolEntry in poolDetailsDictionary)
-        {
-            if (randomAssetIndex < poolEntry.Value.Count)
-            {
-                selectedPoolKey = poolEntry.Key;
-                _logger.LogInformation($"OptimizedImmichFrameLogic: Selected pool '{selectedPoolKey}' with original index {randomAssetIndex} (pool count: {poolEntry.Value.Count})");
-                selectedAsset = await FetchAssetFromPoolAsync(poolEntry.Key, (int)randomAssetIndex, poolEntry.Value);
-                break;
-            }
-            randomAssetIndex -= poolEntry.Value.Count;
-        }
-
-        if (selectedAsset == null)
-        {
-            _logger.LogWarning("OptimizedImmichFrameLogic: Could not select an asset even though totalAssets > 0. This might indicate an issue in pool iteration or FetchAssetFromPoolAsync. Selected pool key was '{selectedPoolKey}'.", selectedPoolKey);
-        }
-        else
-        {
-             _logger.LogInformation($"OptimizedImmichFrameLogic: Successfully fetched asset ID {selectedAsset.Id} from pool '{selectedPoolKey}'.");
-        }
-        return selectedAsset;
-    }
-
-    private async Task<Dictionary<string, AssetPoolDetails>> FetchAssetPoolDetailsAsync()
-    {
-        var poolCollectionDetails = new Dictionary<string, AssetPoolDetails>();
-        _logger.LogInformation("OptimizedImmichFrameLogic: Fetching asset pool details...");
+        var assetPools = new List<IAssetPool>();
+        _logger.LogInformation("OptimizedImmichFrameLogic: Initializing asset pools...");
 
         if (_settings.ShowFavorites)
         {
-            try
+            var favPool = new FavoriteAssetPool(_settings, _immichApi, _loggerFactory.CreateLogger<FavoriteAssetPool>());
+            if (await favPool.GetAssetCountAsync() > 0) // Also triggers initial count fetch if not done
             {
-                var details = await GetFavoritePoolDetailsAsync();
-                if (details.Count > 0) poolCollectionDetails["favorites"] = details;
-                _logger.LogInformation($"OptimizedImmichFrameLogic: Favorites count: {details.Count}");
+                assetPools.Add(favPool);
+                favPool.StartBackgroundRefillAsync(); // Ensure queue starts filling
+                _logger.LogInformation($"OptimizedImmichFrameLogic: Added FavoriteAssetPool with {await favPool.GetAssetCountAsync()} potential assets. Initial queue refill started.");
             }
-            catch (Exception ex)
+            else
             {
-                _logger.LogError(ex, "OptimizedImmichFrameLogic: Error fetching favorite pool details");
+                 _logger.LogInformation($"OptimizedImmichFrameLogic: FavoriteAssetPool has no assets (count is 0), not adding.");
             }
         }
 
         if (_settings.Albums?.Any() ?? false)
         {
-            try
+            var excludedAlbumGuids = new HashSet<Guid>(_settings.ExcludedAlbums ?? Enumerable.Empty<Guid>());
+            foreach (var albumId in _settings.Albums)
             {
-                await AddAlbumPoolDetailsAsync(poolCollectionDetails);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "OptimizedImmichFrameLogic: Error fetching album pool details");
+                if (excludedAlbumGuids.Contains(albumId))
+                {
+                    _logger.LogDebug($"OptimizedImmichFrameLogic: Skipping excluded album ID {albumId}");
+                    continue;
+                }
+                var albumPool = new AlbumAssetPool(albumId, _settings, _immichApi, _loggerFactory.CreateLogger<AlbumAssetPool>());
+                if (await albumPool.GetAssetCountAsync() > 0)
+                {
+                    assetPools.Add(albumPool);
+                    albumPool.StartBackgroundRefillAsync();
+                    _logger.LogInformation($"OptimizedImmichFrameLogic: Added AlbumAssetPool for ID {albumId} with {await albumPool.GetAssetCountAsync()} potential assets. Initial queue refill started.");
+                }
+                else
+                {
+                    _logger.LogInformation($"OptimizedImmichFrameLogic: AlbumAssetPool for ID {albumId} has no assets (count is 0), not adding.");
+                }
             }
         }
 
         if (_settings.People?.Any() ?? false)
         {
-            try
+            foreach (var personId in _settings.People)
             {
-                await AddPeoplePoolDetailsAsync(poolCollectionDetails);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "OptimizedImmichFrameLogic: Error fetching people pool details");
+                var personPool = new PersonAssetPool(personId, _settings, _immichApi, _loggerFactory.CreateLogger<PersonAssetPool>());
+                if (await personPool.GetAssetCountAsync() > 0)
+                {
+                    assetPools.Add(personPool);
+                    personPool.StartBackgroundRefillAsync();
+                    _logger.LogInformation($"OptimizedImmichFrameLogic: Added PersonAssetPool for ID {personId} with {await personPool.GetAssetCountAsync()} potential assets. Initial queue refill started.");
+                }
+                else
+                {
+                     _logger.LogInformation($"OptimizedImmichFrameLogic: PersonAssetPool for ID {personId} has no assets (count is 0), not adding.");
+                }
             }
         }
 
         if (_settings.ShowMemories)
         {
-            try
+            var memPool = new MemoryAssetPool(_settings, _immichApi, _loggerFactory.CreateLogger<MemoryAssetPool>());
+            if (await memPool.GetAssetCountAsync() > 0)
             {
-                var details = await GetMemoryPoolDetailsAsync();
-                if (details.Count > 0) poolCollectionDetails["memories"] = details;
-                _logger.LogInformation($"OptimizedImmichFrameLogic: Memories count: {details.Count}, IDs collected: {details.MemoryAssetIds?.Count}");
+                assetPools.Add(memPool);
+                memPool.StartBackgroundRefillAsync();
+                // MemoryAssetPool's InitializeAsync was already verbose, GetAssetCountAsync and StartBackgroundRefillAsync cover the logging.
+                _logger.LogInformation($"OptimizedImmichFrameLogic: Added MemoryAssetPool with {await memPool.GetAssetCountAsync()} potential assets. Initial queue refill started.");
             }
-            catch (Exception ex)
+            else
             {
-                _logger.LogError(ex, "OptimizedImmichFrameLogic: Error fetching memory pool details");
+                _logger.LogInformation($"OptimizedImmichFrameLogic: MemoryAssetPool has no assets (count is 0), not adding.");
             }
         }
 
-        _logger.LogInformation("OptimizedImmichFrameLogic: Finished fetching asset pool details. Total pools with assets: {PoolCount}", poolCollectionDetails.Count(kvp => kvp.Value.Count > 0));
-        return poolCollectionDetails;
+        _logger.LogInformation($"OptimizedImmichFrameLogic: Finished initializing asset pools. Total active pools with assets: {assetPools.Count}.");
+        return assetPools;
     }
 
-    private async Task<AssetPoolDetails> GetFavoritePoolDetailsAsync()
+    public async Task<AssetResponseDto?> GetNextAsset()
     {
-        _logger.LogDebug("OptimizedImmichFrameLogic: Getting favorite pool details.");
-        var searchDto = new MetadataSearchDto { IsFavorite = true, Type = AssetTypeEnum.IMAGE, Size = 1 };
-        searchDto.Visibility = _settings.ShowArchived ? AssetVisibility.Archive : AssetVisibility.Timeline;
-        searchDto.TakenAfter = _settings.ImagesFromDate ?? (_settings.ImagesFromDays.HasValue ? DateTime.Today.AddDays(-_settings.ImagesFromDays.Value) : null);
-        searchDto.TakenBefore = _settings.ImagesUntilDate;
-        if (_settings.Rating.HasValue) searchDto.Rating = _settings.Rating.Value;
-        var result = await _immichApi.SearchAssetsAsync(searchDto);
-        return new AssetPoolDetails { Count = result.Assets.Total };
-    }
+        _logger.LogInformation("OptimizedImmichFrameLogic: GetNextAsset called. Fetching/retrieving asset pools from cache.");
+        var assetPools = await _assetPoolCache.GetOrAddAsync("AssetPools", InitializeAssetPoolsAsync);
 
-    private async Task AddAlbumPoolDetailsAsync(Dictionary<string, AssetPoolDetails> poolCollection)
-    {
-        _logger.LogDebug("OptimizedImmichFrameLogic: Getting album pool details for {AlbumCount} albums.", _settings.Albums.Count());
-        var excludedAlbumGuids = new HashSet<Guid>(_settings.ExcludedAlbums ?? Enumerable.Empty<Guid>());
-        var takenAfterDate = _settings.ImagesFromDate ?? (_settings.ImagesFromDays.HasValue ? DateTime.Today.AddDays(-_settings.ImagesFromDays.Value) : (DateTime?)null);
-        var takenBeforeDate = _settings.ImagesUntilDate;
-
-        foreach (var albumId in _settings.Albums)
+        if (assetPools == null || !assetPools.Any())
         {
-            if (excludedAlbumGuids.Contains(albumId))
-            {
-                _logger.LogDebug("OptimizedImmichFrameLogic: Skipping excluded album ID {AlbumId}", albumId);
-                continue;
-            }
-            _logger.LogDebug("OptimizedImmichFrameLogic: Fetching details for album ID {AlbumId}", albumId);
-            try
-            {
-                var albumInfo = await _immichApi.GetAlbumInfoAsync(albumId, null, null);
-                IEnumerable<AssetResponseDto> assetsToFilter = albumInfo.Assets;
-                if (!_settings.ShowArchived) assetsToFilter = assetsToFilter.Where(a => !a.IsArchived);
-                assetsToFilter = assetsToFilter.Where(a => a.Type == AssetTypeEnum.IMAGE);
-                if (takenAfterDate.HasValue) assetsToFilter = assetsToFilter.Where(a => a.ExifInfo?.DateTimeOriginal != null && a.LocalDateTime >= takenAfterDate.Value);
-                if (takenBeforeDate.HasValue) assetsToFilter = assetsToFilter.Where(a => a.ExifInfo?.DateTimeOriginal != null && a.LocalDateTime <= takenBeforeDate.Value);
-                if (_settings.Rating.HasValue) assetsToFilter = assetsToFilter.Where(a => a.ExifInfo?.Rating == _settings.Rating.Value);
-                var count = assetsToFilter.Count();
-                if (count > 0) poolCollection[$"album_{albumId}"] = new AssetPoolDetails { Count = count };
-                _logger.LogInformation($"OptimizedImmichFrameLogic: Album ID {albumId} count: {count}");
-            }
-            catch (ApiException ex)
-            {
-                _logger.LogError(ex, "OptimizedImmichFrameLogic: Failed to get info for album {AlbumId}", albumId);
-            }
+            _logger.LogWarning("OptimizedImmichFrameLogic: No active asset pools found after attempting to initialize. Ensure settings allow for some assets to be selected.");
+            return null;
         }
-    }
 
-    private async Task AddPeoplePoolDetailsAsync(Dictionary<string, AssetPoolDetails> poolCollection)
-    {
-        _logger.LogDebug("OptimizedImmichFrameLogic: Getting people pool details for {PeopleCount} people.", _settings.People.Count());
-        foreach (var personId in _settings.People)
+        long totalAssets = 0;
+        List<string> poolSummaries = new List<string>();
+        foreach (var pool in assetPools)
         {
-            _logger.LogDebug("OptimizedImmichFrameLogic: Fetching details for person ID {PersonId}", personId);
-            var searchDto = new MetadataSearchDto { PersonIds = new[] { personId }, Type = AssetTypeEnum.IMAGE, Size = 1 };
-            searchDto.Visibility = _settings.ShowArchived ? AssetVisibility.Archive : AssetVisibility.Timeline;
-            searchDto.TakenAfter = _settings.ImagesFromDate ?? (_settings.ImagesFromDays.HasValue ? DateTime.Today.AddDays(-_settings.ImagesFromDays.Value) : null);
-            searchDto.TakenBefore = _settings.ImagesUntilDate;
-            if (_settings.Rating.HasValue) searchDto.Rating = _settings.Rating.Value;
-            try
-            {
-                var result = await _immichApi.SearchAssetsAsync(searchDto);
-                if (result.Assets.Total > 0) poolCollection[$"person_{personId}"] = new AssetPoolDetails { Count = result.Assets.Total };
-                _logger.LogInformation($"OptimizedImmichFrameLogic: Person ID {personId} count: {result.Assets.Total}");
-            }
-            catch (ApiException ex)
-            {
-                _logger.LogError(ex, "OptimizedImmichFrameLogic: Failed to search assets for person {PersonId}", personId);
-            }
+            var count = await pool.GetAssetCountAsync();
+            totalAssets += count;
+            poolSummaries.Add($"'{pool.PoolName}': {count} assets");
         }
-    }
+        _logger.LogInformation($"OptimizedImmichFrameLogic: Pool counts: {string.Join("; ", poolSummaries)}");
 
-    private async Task<AssetPoolDetails> GetMemoryPoolDetailsAsync()
-    {
-        _logger.LogDebug("OptimizedImmichFrameLogic: Getting memory pool details.");
-        var memories = await _immichApi.SearchMemoriesAsync(DateTime.Now, null, null, null);
-        var allMemoryAssets = new List<AssetResponseDto>();
-        foreach (var memory in memories) { allMemoryAssets.AddRange(memory.Assets); }
-        _logger.LogDebug("OptimizedImmichFrameLogic: Total assets from all memories before filtering: {MemoryAssetCount}", allMemoryAssets.Count);
-
-        var assetsToFetchExif = allMemoryAssets.Where(a => a.ExifInfo == null || a.ExifInfo.DateTimeOriginal == null).Select(a => a.Id).ToList();
-        if(assetsToFetchExif.Any())
+        if (totalAssets == 0)
         {
-           _logger.LogInformation("OptimizedImmichFrameLogic: Fetching missing ExifInfo for {AssetCount} memory assets.", assetsToFetchExif.Count);
-           for(int i=0; i < allMemoryAssets.Count; i++)
-           {
-               if(assetsToFetchExif.Contains(allMemoryAssets[i].Id))
-               {
-                   try
-                   {
-                       _logger.LogDebug("OptimizedImmichFrameLogic: Fetching missing ExifInfo for memory asset ID {AssetId}", allMemoryAssets[i].Id);
-                       allMemoryAssets[i] = await _immichApi.GetAssetInfoAsync(Guid.Parse(allMemoryAssets[i].Id), null);
-                   }
-                   catch(Exception ex)
-                   {
-                       _logger.LogWarning(ex, "OptimizedImmichFrameLogic: Failed to fetch ExifInfo for memory asset {AssetId}", allMemoryAssets[i].Id);
-                   }
-               }
-           }
+            _logger.LogWarning("OptimizedImmichFrameLogic: Total assets across all active pools is 0. Cannot select an asset.");
+            return null;
+        }
+        _logger.LogInformation($"OptimizedImmichFrameLogic: Total assets available for selection: {totalAssets} from {assetPools.Count} active pools.");
+
+        long randomAssetIndex = (long)(_random.NextDouble() * totalAssets);
+        _logger.LogDebug($"OptimizedImmichFrameLogic: Random asset index chosen: {randomAssetIndex} (from total {totalAssets})");
+
+        AssetResponseDto? selectedAsset = null;
+        foreach (var pool in assetPools)
+        {
+            var poolCount = await pool.GetAssetCountAsync();
+            if (randomAssetIndex < poolCount)
+            {
+                _logger.LogInformation($"OptimizedImmichFrameLogic: Selected pool '{pool.PoolName}' for random asset (pool's asset share: {poolCount} of total {totalAssets})");
+                // Get asset from the selected pool's queue
+                selectedAsset = await pool.GetNextAssetFromQueueAsync();
+
+                if (selectedAsset != null)
+                {
+                    _logger.LogInformation($"OptimizedImmichFrameLogic: Successfully fetched asset ID {selectedAsset.Id} (Name: {selectedAsset.OriginalFileName}) from pool '{pool.PoolName}'s queue.");
+                }
+                else
+                {
+                    _logger.LogWarning($"OptimizedImmichFrameLogic: Pool '{pool.PoolName}' returned null from its queue. This may indicate the pool is temporarily empty or exhausted.");
+                }
+                break;
+            }
+            randomAssetIndex -= poolCount;
         }
 
-        IEnumerable<AssetResponseDto> assetsToFilter = allMemoryAssets;
-        if (!_settings.ShowArchived) assetsToFilter = assetsToFilter.Where(a => !a.IsArchived);
-        assetsToFilter = assetsToFilter.Where(a => a.Type == AssetTypeEnum.IMAGE);
-        var takenAfterDate = _settings.ImagesFromDate ?? (_settings.ImagesFromDays.HasValue ? DateTime.Today.AddDays(-_settings.ImagesFromDays.Value) : (DateTime?)null);
-        var takenBeforeDate = _settings.ImagesUntilDate;
-        if (takenAfterDate.HasValue) assetsToFilter = assetsToFilter.Where(a => a.ExifInfo?.DateTimeOriginal != null && a.LocalDateTime >= takenAfterDate.Value);
-        if (takenBeforeDate.HasValue) assetsToFilter = assetsToFilter.Where(a => a.ExifInfo?.DateTimeOriginal != null && a.LocalDateTime <= takenBeforeDate.Value);
-        if (_settings.Rating.HasValue) assetsToFilter = assetsToFilter.Where(a => a.ExifInfo?.Rating == _settings.Rating.Value);
-
-        var filteredAssetsList = assetsToFilter.ToList();
-        List<Guid> memoryAssetIds = filteredAssetsList.Select(a => Guid.Parse(a.Id)).Distinct().ToList();
-        _logger.LogDebug("OptimizedImmichFrameLogic: Total memory assets after filtering: {FilteredMemoryAssetCount}", filteredAssetsList.Count);
-        return new AssetPoolDetails { Count = memoryAssetIds.Count, MemoryAssetIds = memoryAssetIds };
+        if (selectedAsset == null && totalAssets > 0)
+        {
+            _logger.LogWarning("OptimizedImmichFrameLogic: Failed to select an asset, though total available assets was greater than zero. This might indicate an issue with the selection logic, an empty pool that wasn't filtered out, or all selected pools returned null from their queues.");
+        }
+        else if (selectedAsset == null && totalAssets == 0)
+        {
+             _logger.LogInformation("OptimizedImmichFrameLogic: No assets available to select (total assets is 0).");
+        }
+        return selectedAsset;
     }
+
+    // Removed FetchAssetPoolDetailsAsync
+    // Removed GetFavoritePoolDetailsAsync
+    // Removed AddAlbumPoolDetailsAsync
+    // Removed AddPeoplePoolDetailsAsync
+    // Removed GetMemoryPoolDetailsAsync
+    // Removed FetchAssetFromPoolAsync
+    // Removed GetNthFavoriteAssetAsync
+    // Removed GetNthAlbumAssetAsync
+    // Removed GetNthPersonAssetAsync
 
     public Task<AssetResponseDto> GetAssetInfoById(Guid assetId)
     {
         return _immichApi.GetAssetInfoAsync(assetId, null);
-    }
-
-    private async Task<AssetResponseDto?> FetchAssetFromPoolAsync(string poolKey, int indexInPool, AssetPoolDetails poolDetails)
-    {
-        _logger.LogDebug($"OptimizedImmichFrameLogic: Fetching asset from pool '{poolKey}' at index {indexInPool}.");
-        string[] parts = poolKey.Split('_');
-        string poolType = parts[0];
-        Guid? entityId = parts.Length > 1 ? Guid.Parse(parts[1]) : (Guid?)null;
-
-        try
-        {
-            switch (poolType)
-            {
-                case "favorites":
-                    return await GetNthFavoriteAssetAsync(indexInPool);
-                case "album":
-                    if (entityId.HasValue) return await GetNthAlbumAssetAsync(entityId.Value, indexInPool);
-                    _logger.LogWarning($"OptimizedImmichFrameLogic: Album ID missing for pool key '{poolKey}'."); return null;
-                case "person":
-                    if (entityId.HasValue) return await GetNthPersonAssetAsync(entityId.Value, indexInPool);
-                    _logger.LogWarning($"OptimizedImmichFrameLogic: Person ID missing for pool key '{poolKey}'."); return null;
-                case "memories":
-                    if (poolDetails.MemoryAssetIds != null && indexInPool < poolDetails.MemoryAssetIds.Count)
-                    {
-                        var assetId = poolDetails.MemoryAssetIds[indexInPool];
-                        _logger.LogDebug($"OptimizedImmichFrameLogic: Fetching memory asset by ID: {assetId}");
-                        return await GetAssetInfoById(assetId); // Uses existing public method
-                    }
-                    _logger.LogWarning($"OptimizedImmichFrameLogic: Memory asset IDs not available or index out of bounds for pool '{poolKey}'. Index: {indexInPool}, Count: {poolDetails.MemoryAssetIds?.Count}");
-                    return null;
-                default:
-                    _logger.LogWarning($"OptimizedImmichFrameLogic: Unknown pool type '{poolType}' from key '{poolKey}'.");
-                    return null;
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, $"OptimizedImmichFrameLogic: Error fetching asset from pool '{poolKey}' at index {indexInPool}.");
-            return null;
-        }
-    }
-
-    private async Task<AssetResponseDto?> GetNthFavoriteAssetAsync(int n)
-    {
-        _logger.LogDebug($"OptimizedImmichFrameLogic: Fetching {n}th favorite asset.");
-        var searchDto = new MetadataSearchDto { IsFavorite = true, Type = AssetTypeEnum.IMAGE, Page = n + 1, Size = 1 }; // Page is 1-indexed
-        searchDto.Visibility = _settings.ShowArchived ? AssetVisibility.Archive : AssetVisibility.Timeline;
-        searchDto.TakenAfter = _settings.ImagesFromDate ?? (_settings.ImagesFromDays.HasValue ? DateTime.Today.AddDays(-_settings.ImagesFromDays.Value) : null);
-        searchDto.TakenBefore = _settings.ImagesUntilDate;
-        if (_settings.Rating.HasValue) searchDto.Rating = _settings.Rating.Value;
-        var result = await _immichApi.SearchAssetsAsync(searchDto);
-        return result.Assets.Items.FirstOrDefault();
-    }
-
-    private async Task<AssetResponseDto?> GetNthAlbumAssetAsync(Guid albumId, int n)
-    {
-        _logger.LogDebug($"OptimizedImmichFrameLogic: Fetching {n}th asset from album ID {albumId}.");
-        var albumInfo = await _immichApi.GetAlbumInfoAsync(albumId, null, null);
-        IEnumerable<AssetResponseDto> assetsToFilter = albumInfo.Assets;
-        // Apply filters consistent with count calculation
-        if (!_settings.ShowArchived) assetsToFilter = assetsToFilter.Where(a => !a.IsArchived);
-        assetsToFilter = assetsToFilter.Where(a => a.Type == AssetTypeEnum.IMAGE);
-        var takenAfterDate = _settings.ImagesFromDate ?? (_settings.ImagesFromDays.HasValue ? DateTime.Today.AddDays(-_settings.ImagesFromDays.Value) : (DateTime?)null);
-        var takenBeforeDate = _settings.ImagesUntilDate;
-        if (takenAfterDate.HasValue) assetsToFilter = assetsToFilter.Where(a => a.ExifInfo?.DateTimeOriginal != null && a.LocalDateTime >= takenAfterDate.Value);
-        if (takenBeforeDate.HasValue) assetsToFilter = assetsToFilter.Where(a => a.ExifInfo?.DateTimeOriginal != null && a.LocalDateTime <= takenBeforeDate.Value);
-        if (_settings.Rating.HasValue) assetsToFilter = assetsToFilter.Where(a => a.ExifInfo?.Rating == _settings.Rating.Value);
-        var assetList = assetsToFilter.ToList();
-        return (n < assetList.Count) ? assetList[n] : null;
-    }
-
-    private async Task<AssetResponseDto?> GetNthPersonAssetAsync(Guid personId, int n)
-    {
-        _logger.LogDebug($"OptimizedImmichFrameLogic: Fetching {n}th asset for person ID {personId}.");
-        var searchDto = new MetadataSearchDto { PersonIds = new[] { personId }, Type = AssetTypeEnum.IMAGE, Page = n + 1, Size = 1 }; // Page is 1-indexed
-        searchDto.Visibility = _settings.ShowArchived ? AssetVisibility.Archive : AssetVisibility.Timeline;
-        searchDto.TakenAfter = _settings.ImagesFromDate ?? (_settings.ImagesFromDays.HasValue ? DateTime.Today.AddDays(-_settings.ImagesFromDays.Value) : null);
-        searchDto.TakenBefore = _settings.ImagesUntilDate;
-        if (_settings.Rating.HasValue) searchDto.Rating = _settings.Rating.Value;
-        var result = await _immichApi.SearchAssetsAsync(searchDto);
-        return result.Assets.Items.FirstOrDefault();
     }
 
     public async Task<IEnumerable<AlbumResponseDto>> GetAlbumInfoById(Guid assetId)

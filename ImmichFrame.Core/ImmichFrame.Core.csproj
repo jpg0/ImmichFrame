@@ -27,4 +27,13 @@
     <PackageReference Include="ThumbHash" Version="2.1.1" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Compile Include="Interfaces\IAssetPool.cs" />
+    <Compile Include="Models\AssetPools\AssetPoolBase.cs" />
+    <Compile Include="Models\AssetPools\FavoriteAssetPool.cs" />
+    <Compile Include="Models\AssetPools\AlbumAssetPool.cs" />
+    <Compile Include="Models\AssetPools\PersonAssetPool.cs" />
+    <Compile Include="Models\AssetPools\MemoryAssetPool.cs" />
+  </ItemGroup>
+
 </Project>
