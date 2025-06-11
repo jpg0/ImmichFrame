@@ -6,6 +6,7 @@ using System.Data;
 
 namespace ImmichFrame.Core.Logic
 {
+    [System.Obsolete("Use OptimizedImmichFrameLogic instead. This class may be removed in a future version.")]
     public class ImmichFrameLogic : IImmichFrameLogic
     {
         private IServerSettings _settings;
