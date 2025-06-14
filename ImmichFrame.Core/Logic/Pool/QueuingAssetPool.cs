@@ -14,11 +14,12 @@ public class QueuingAssetPool(ILogger<QueuingAssetPool> _logger, IAssetPool @del
 
     public override Task<long> GetAssetCount(CancellationToken ct = default) => @delegate.GetAssetCount(ct);
     
+    
     protected override async Task<AssetResponseDto?> GetNextAsset(CancellationToken ct)
     {
         try
         {
-            if (_assetQueue.Reader.Count < RELOAD_THRESHOLD)
+            if (_assetQueue.Reader.Count <= RELOAD_THRESHOLD)
             {
                 // Fire-and-forget, reloading assets in the background
                 _ = ReloadAssetsAsync();

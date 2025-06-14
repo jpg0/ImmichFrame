@@ -26,7 +26,7 @@ public class PersonAssetsPool(ApiCache apiCache, ImmichApi immichApi, IAccountSe
                     WithPeople = true
                 };
 
-                var personInfo = await immichApi.SearchAssetsAsync(metadataBody);
+                var personInfo = await immichApi.SearchAssetsAsync(metadataBody, ct);
 
                 total = personInfo.Assets.Total;
 
