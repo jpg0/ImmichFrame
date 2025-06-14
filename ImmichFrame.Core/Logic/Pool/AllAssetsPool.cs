@@ -8,8 +8,8 @@ public class AllAssetsPool(ApiCache apiCache, ImmichApi immichApi, IAccountSetti
     public async Task<long> GetAssetCount(CancellationToken ct = default)
     {
         //Retrieve total images count (unfiltered); will update to query filtered stats from Immich
-        return (await apiCache.GetOrAddAsync(GetType().FullName!,
-            () => immichApi.GetAssetStatisticsAsync(null, false, null))).Images;
+        return (await apiCache.GetOrAddAsync(nameof(AllAssetsPool),
+            () => immichApi.GetAssetStatisticsAsync(null, false, null, ct))).Images;
     }
     
     public async Task<IEnumerable<AssetResponseDto>> GetAssets(int requested, CancellationToken ct = default)
@@ -48,11 +48,11 @@ public class AllAssetsPool(ApiCache apiCache, ImmichApi immichApi, IAccountSetti
             searchDto.Rating = rating;
         }
 
-        var assets = await immichApi.SearchRandomAsync(searchDto);
+        var assets = await immichApi.SearchRandomAsync(searchDto, ct);
 
         if (accountSettings.ExcludedAlbums.Any())
         {
-            var excludedAssetList = await GetExcludedAlbumAssets();
+            var excludedAssetList = await GetExcludedAlbumAssets(ct);
             var excludedAssetSet = excludedAssetList.Select(x => x.Id).ToHashSet();
             assets = assets.Where(x => !excludedAssetSet.Contains(x.Id)).ToList();
         }
@@ -61,13 +61,13 @@ public class AllAssetsPool(ApiCache apiCache, ImmichApi immichApi, IAccountSetti
     }
 
 
-    private async Task<IEnumerable<AssetResponseDto>> GetExcludedAlbumAssets()
+    private async Task<IEnumerable<AssetResponseDto>> GetExcludedAlbumAssets(CancellationToken ct = default)
     {
         var excludedAlbumAssets = new List<AssetResponseDto>();
 
         foreach (var albumId in accountSettings.ExcludedAlbums)
         {
-            var albumInfo = await immichApi.GetAlbumInfoAsync(albumId, null, null);
+            var albumInfo = await immichApi.GetAlbumInfoAsync(albumId, null, null, ct);
 
             excludedAlbumAssets.AddRange(albumInfo.Assets);
         }

@@ -7,7 +7,7 @@ public class MemoryAssetsPool(ApiCache apiCache, ImmichApi immichApi, IAccountSe
 {
     protected override async Task<IEnumerable<AssetResponseDto>> LoadAssets(CancellationToken ct = default)
     {
-        var memories = await immichApi.SearchMemoriesAsync(DateTime.Now, null, null, null);
+        var memories = await immichApi.SearchMemoriesAsync(DateTime.Now, null, null, null, ct);
 
         var memoryAssets = new List<AssetResponseDto>();
         foreach (var memory in memories)
@@ -19,7 +19,7 @@ public class MemoryAssetsPool(ApiCache apiCache, ImmichApi immichApi, IAccountSe
             {
                 if (asset.ExifInfo == null)
                 {
-                    var assetInfo = await immichApi.GetAssetInfoAsync(new Guid(asset.Id), null);
+                    var assetInfo = await immichApi.GetAssetInfoAsync(new Guid(asset.Id), null, ct);
                     asset.ExifInfo = assetInfo.ExifInfo;
                     asset.People = assetInfo.People;
                 }

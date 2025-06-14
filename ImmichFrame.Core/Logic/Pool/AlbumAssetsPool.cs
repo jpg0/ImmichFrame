@@ -1,4 +1,5 @@
 using ImmichFrame.Core.Api;
+using ImmichFrame.Core.Helpers;
 using ImmichFrame.Core.Interfaces;
 
 namespace ImmichFrame.Core.Logic.Pool;
@@ -11,8 +12,7 @@ public class AlbumAssetsPool(ApiCache apiCache, ImmichApi immichApi, IAccountSet
 
         foreach (var albumId in accountSettings.ExcludedAlbums)
         {
-            var albumInfo = await immichApi.GetAlbumInfoAsync(albumId, null, null);
-
+            var albumInfo = await immichApi.GetAlbumInfoAsync(albumId, null, null, ct);
             excludedAlbumAssets.AddRange(albumInfo.Assets);
         }
 
@@ -20,12 +20,10 @@ public class AlbumAssetsPool(ApiCache apiCache, ImmichApi immichApi, IAccountSet
 
         foreach (var albumId in accountSettings.Albums)
         {
-            var albumInfo = await immichApi.GetAlbumInfoAsync(albumId, null, null);
-
+            var albumInfo = await immichApi.GetAlbumInfoAsync(albumId, null, null, ct);
             albumAssets.AddRange(albumInfo.Assets);
         }
 
-        return albumAssets
-            .Where(asset => excludedAlbumAssets.Any(exc => exc.Id == asset.Id));
+        return albumAssets.WhereExcludes(excludedAlbumAssets, t => t.Id);
     }
 }
