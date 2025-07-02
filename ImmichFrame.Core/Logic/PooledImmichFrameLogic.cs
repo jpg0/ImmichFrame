@@ -2,6 +2,7 @@ using ImmichFrame.Core.Api;
 using ImmichFrame.Core.Exceptions;
 using ImmichFrame.Core.Helpers;
 using ImmichFrame.Core.Interfaces;
+using System.Net.Http; // Added for IHttpClientFactory
 using ImmichFrame.Core.Logic.Pool;
 
 namespace ImmichFrame.Core.Logic;
@@ -14,19 +15,26 @@ public class PooledImmichFrameLogic : IImmichFrameLogic
     private readonly ImmichApi _immichApi;
     private readonly string _downloadLocation = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ImageCache");
 
-    public PooledImmichFrameLogic(IAccountSettings accountSettings, IGeneralSettings generalSettings)
+    public PooledImmichFrameLogic(IAccountSettings accountSettings, IGeneralSettings generalSettings, IHttpClientFactory httpClientFactory)
     {
         _generalSettings = generalSettings;
 
-        var httpClient = new HttpClient();
+        var httpClient = httpClientFactory.CreateClient("ImmichApiAccountClient");
+        // The HttpClient created by the factory will be configured in Startup/Program.cs (for production)
+        // or in the test setup (for tests).
+        // We still need to apply the API key here as it's account-specific.
         httpClient.UseApiKey(accountSettings.ApiKey);
+        // ImmichApi will set its own BaseUrl based on accountSettings.ImmichServerUrl,
+        // so the factory-created client doesn't need a specific BaseAddress if ImmichApi handles it.
         _immichApi = new ImmichApi(accountSettings.ImmichServerUrl, httpClient);
+
         _apiCache = new ApiCache(TimeSpan.FromHours(generalSettings.RefreshAlbumPeopleInterval));
         _pool = BuildPool(accountSettings);
     }
 
     private IAssetPool BuildPool(IAccountSettings accountSettings)
     {
+        // This method now uses the class field _immichApi which was created with a factory-produced HttpClient
         if (!accountSettings.ShowFavorites && !accountSettings.ShowMemories && !accountSettings.Albums.Any() && !accountSettings.People.Any())
         {
             return new AllAssetsPool(_apiCache, _immichApi, accountSettings);
