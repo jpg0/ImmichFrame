@@ -18,15 +18,21 @@ public class TotalAccountImagesSelectionStrategy(ILogger<TotalAccountImagesSelec
     {
         var chosen = await _accounts.ChooseOne(logic => logic.GetTotalAssets());
         
+        if (chosen == null)
+        {
+            _logger.LogDebug("No account could be chosen (e.g., all accounts have zero assets).");
+            return null;
+        }
+
         var asset = await chosen.GetNextAsset();
         if (asset != null)
         {
             _logger.LogDebug("Returning next asset {id}", asset.Id);
-            await _tracker.RecordAssetLocation(chosen, asset.Id);
+            await _tracker.RecordAssetLocation(chosen, asset.Id); // chosen is not null here
             return asset;
         }
         
-        _logger.LogDebug("No next asset found");
+        _logger.LogDebug("No next asset found from the chosen account.");
         return null;
     }
 

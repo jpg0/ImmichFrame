@@ -14,9 +14,13 @@ public class PooledImmichFrameLogic : IImmichFrameLogic
     private readonly IAssetPool _pool;
     private readonly ImmichApi _immichApi;
     private readonly string _downloadLocation = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ImageCache");
+    private readonly Guid _accountId; // Added field for AccountId
+
+    public Guid AccountId => _accountId; // Implement AccountId property
 
     public PooledImmichFrameLogic(IAccountSettings accountSettings, IGeneralSettings generalSettings, IHttpClientFactory httpClientFactory)
     {
+        _accountId = accountSettings.Id; // Assign AccountId
         _generalSettings = generalSettings;
 
         var httpClient = httpClientFactory.CreateClient("ImmichApiAccountClient");

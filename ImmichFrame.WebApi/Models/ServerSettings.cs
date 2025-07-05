@@ -54,6 +54,7 @@ public class GeneralSettings : IGeneralSettings, IConfigSettable
 
 public class ServerAccountSettings : IAccountSettings, IConfigSettable
 {
+    public Guid Id { get; } = Guid.NewGuid(); // Added Id property with default initializer
     public string ImmichServerUrl { get; set; } = string.Empty;
     public string ApiKey { get; set; } = string.Empty;
     public bool ShowMemories { get; set; } = false;

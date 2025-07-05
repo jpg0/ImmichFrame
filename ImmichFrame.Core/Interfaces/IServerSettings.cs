@@ -8,6 +8,7 @@
 
     public interface IAccountSettings
     {
+        public Guid Id { get; } // Added Id property
         public string ImmichServerUrl { get; }
         public string ApiKey { get; }
         public bool ShowMemories { get; }

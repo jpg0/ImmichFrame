@@ -67,6 +67,7 @@ public class ServerSettingsV1Adapter(ServerSettingsV1 _delegate) : IServerSettin
 
     class AccountSettingsV1Adapter(ServerSettingsV1 _delegate) : IAccountSettings
     {
+        public Guid Id { get; } = Guid.NewGuid(); // Added Id Property
         public string ImmichServerUrl => _delegate.ImmichServerUrl;
         public string ApiKey => _delegate.ApiKey;
         public bool ShowMemories => _delegate.ShowMemories;

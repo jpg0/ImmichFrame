@@ -54,4 +54,6 @@ public class MultiImmichFrameLogicDelegate : IImmichFrameLogic
 
     public Task SendWebhookNotification(IWebhookNotification notification) =>
         WebhookHelper.SendWebhookNotification(notification, _serverSettings.GeneralSettings.Webhook);
+
+    public Guid AccountId => throw new NotImplementedException("AccountId is not applicable to MultiImmichFrameLogicDelegate.");
 }

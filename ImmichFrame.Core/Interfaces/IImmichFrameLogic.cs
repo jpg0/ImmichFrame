@@ -11,6 +11,7 @@ namespace ImmichFrame.Core.Interfaces
         public Task<(string fileName, string ContentType, Stream fileStream)> GetImage(Guid id);
         public Task<long> GetTotalAssets();
         public Task SendWebhookNotification(IWebhookNotification notification);
+        Guid AccountId { get; } // Added AccountId
     }
     
     public interface IAccountSelectionStrategy
