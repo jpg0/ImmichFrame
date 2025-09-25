@@ -39,7 +39,7 @@
 	"type": "module",
 	"dependencies": {
 		"@mdi/js": "^7.4.47",
-		"@sveltejs/adapter-node": "^5.2.2",
+		"@sveltejs/adapter-node": "^5.3.1",
 		"date-fns": "^4.1.0",
 		"oazapfts": "^6.1.0",
 		"openapi-fetch": "^0.12.0",
